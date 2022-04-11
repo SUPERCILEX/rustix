@@ -49,10 +49,6 @@ fn main() {
     // and not something we want accidentally enabled via `--all-features`.
     let rustix_use_experimental_asm = var("CARGO_CFG_RUSTIX_USE_EXPERIMENTAL_ASM").is_ok();
 
-    // Miri doesn't support inline asm, and has builtin support for recognizing
-    // libc FFI calls, so if we're running under miri, use the libc backend.
-    let miri = var("CARGO_CFG_MIRI").is_ok();
-
     // If experimental features are enabled, auto-detect and use available
     // features.
     if rustc_dep_of_std {
@@ -93,7 +89,6 @@ fn main() {
         || os != "linux"
         || !inline_asm_name_present
         || is_unsupported_abi
-        || miri
         || ((arch == "powerpc64" || arch.starts_with("mips")) && !rustix_use_experimental_asm);
     if libc {
         // Use the libc backend.
