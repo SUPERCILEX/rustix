@@ -149,7 +149,13 @@ pub enum DumpableBehavior {
 /// [FreeBSD `procctl(PROC_TRACE_CTL,...)`]: https://man.freebsd.org/cgi/man.cgi?query=procctl&sektion=2
 #[inline]
 pub fn set_dumpable_behavior(process: ProcSelector, config: DumpableBehavior) -> io::Result<()> {
-    unsafe { procctl(PROC_TRACE_CTL, process, config as usize as *mut _) }
+    unsafe {
+        procctl(
+            PROC_TRACE_CTL,
+            process,
+            ptr::from_exposed_addr_mut(config as usize),
+        )
+    }
 }
 
 //
