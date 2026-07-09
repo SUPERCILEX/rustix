@@ -5,6 +5,7 @@ use crate::fd::AsFd;
 use crate::ffi::CStr;
 use crate::fs::FileType;
 use crate::io;
+use core::cmp;
 use core::fmt;
 use core::mem::{align_of, MaybeUninit};
 
@@ -25,6 +26,9 @@ pub struct RawDir<'buf, Fd: AsFd> {
     buf: &'buf mut [MaybeUninit<u8>],
     initialized: usize,
     offset: usize,
+
+    refill_chunk_size: usize,
+    finished_fetching_dents: bool,
 }
 
 impl<'buf, Fd: AsFd> RawDir<'buf, Fd> {
@@ -126,19 +130,39 @@ impl<'buf, Fd: AsFd> RawDir<'buf, Fd> {
     /// }
     /// ```
     pub fn new(fd: Fd, buf: &'buf mut [MaybeUninit<u8>]) -> Self {
+        let buf = {
+            let offset = buf.as_ptr().align_offset(align_of::<linux_dirent64>());
+            if offset < buf.len() {
+                &mut buf[offset..]
+            } else {
+                &mut []
+            }
+        };
+        let refill_chunk_size = buf.len();
         Self {
             fd,
-            buf: {
-                let offset = buf.as_ptr().align_offset(align_of::<linux_dirent64>());
-                if offset < buf.len() {
-                    &mut buf[offset..]
-                } else {
-                    &mut []
-                }
-            },
+            buf,
             initialized: 0,
             offset: 0,
+            refill_chunk_size,
+            finished_fetching_dents: false,
         }
+    }
+
+    /// When filling the provided buffer, specify the buffer size that should
+    /// be provided in getdents64.
+    ///
+    /// ## Why is this useful?
+    ///
+    /// On some file systems (nfs for example), experiments have shown
+    /// performance degradation as the buffer size grows. Simultaneously,
+    /// directory modifying operations like unlinkat can make a subsequent
+    /// getdents64 significantly slower. Thus, it is optimal to buffer up the
+    /// entire directory in memory before modifying it. This method allows us
+    /// to do just that without paying the cost incurred by giving file systems
+    /// a huge buffer to fill.
+    pub fn set_refill_chunk_size(&mut self, refill_chunk_size: usize) {
+        self.refill_chunk_size = cmp::min(refill_chunk_size, self.buf.len());
     }
 }
 
@@ -201,13 +225,25 @@ impl<'buf, Fd: AsFd> RawDir<'buf, Fd> {
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<io::Result<RawDirEntry<'_>>> {
         if self.is_buffer_empty() {
-            match getdents_uninit(self.fd.as_fd(), self.buf) {
-                Ok(0) => return None,
-                Ok(bytes_read) => {
-                    self.initialized = bytes_read;
-                    self.offset = 0;
+            if self.finished_fetching_dents {
+                return None;
+            }
+
+            self.initialized = 0;
+            self.offset = 0;
+            while self.buf.len() - self.initialized >= self.refill_chunk_size {
+                match getdents_uninit(
+                    self.fd.as_fd(),
+                    &mut self.buf[self.initialized..self.initialized + self.refill_chunk_size],
+                ) {
+                    Ok(0) if self.initialized > 0 => {
+                        self.finished_fetching_dents = true;
+                        break;
+                    }
+                    Ok(0) => return None,
+                    Ok(bytes_read) => self.initialized += bytes_read,
+                    Err(e) => return Some(Err(e)),
                 }
-                Err(e) => return Some(Err(e)),
             }
         }
 
